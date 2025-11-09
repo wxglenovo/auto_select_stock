@@ -2,6 +2,7 @@ name: Auto Select Stock
 
 on:
   schedule:
+    # 每个交易日 16:00 运行（可按需修改）
     - cron: "0 16 * * 1-5"
   workflow_dispatch:
 
@@ -11,22 +12,30 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.10"
+          python-version: 3.10
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Auto Select Stock
+      - name: Download TDX historical data
+        run: |
+          mkdir -p tdx_data
+          TDX_URL="https://data.tdx.com.cn/vipdoc/hsjday.zip"
+          wget -O tdx_data/hsjday.zip $TDX_URL
+          unzip -o tdx_data/hsjday.zip -d tdx_data || true
+          echo "TDX 数据下载并解压完成"
+
+      - name: Run auto select stock
         run: python auto_select_stock.py
 
-      - name: Upload Results
+      - name: Upload results
         uses: actions/upload-artifact@v4
         with:
           name: selected_stocks_results
