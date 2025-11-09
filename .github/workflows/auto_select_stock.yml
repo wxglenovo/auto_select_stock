@@ -2,7 +2,7 @@ name: Auto Select Stock
 
 on:
   schedule:
-    - cron: "0 18 * * *"  # 每天18点盘后运行
+    - cron: "0 18 * * *"  # 每天北京时间18:00执行，盘后数据可用
   workflow_dispatch:
 
 jobs:
@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -22,6 +22,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install akshare pandas matplotlib tqdm
 
       - name: Run Auto Select Stock
         run: |
@@ -30,17 +31,11 @@ jobs:
       - name: Upload Selected Stocks CSV
         uses: actions/upload-artifact@v4
         with:
-          name: selected_stocks
-          path: output/selected_stocks.csv
+          name: selected_stocks_csv
+          path: selected_stocks.csv
 
-      - name: Upload Stock Count Plot
+      - name: Upload Selected Stock Count Chart
         uses: actions/upload-artifact@v4
         with:
-          name: selected_stock_count
-          path: output/selected_stock_count.png
-
-      - name: Upload Stock Count History
-        uses: actions/upload-artifact@v4
-        with:
-          name: stock_count_history
-          path: output/stock_count_history.csv
+          name: selected_stock_count_png
+          path: selected_stock_count.png
