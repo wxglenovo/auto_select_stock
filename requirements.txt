@@ -1,2 +1,4 @@
-akshare
 pandas
+matplotlib
+akshare
+tqdm
