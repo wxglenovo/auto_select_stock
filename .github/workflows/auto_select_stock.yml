@@ -26,16 +26,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install akshare pandas matplotlib tqdm
 
-      # 运行选股脚本
+      # 运行选股脚本并输出日志到文件
       - name: Run Stock Selection Script
         run: |
-          python auto_select_stock.py
+          echo "[信息] 开始运行选股脚本..." 
+          python auto_select_stock.py 2>&1 | tee run_log.txt
+          echo "[信息] 脚本运行结束。日志已保存到 run_log.txt"
 
-      # 上传选股结果与折线图
-      - name: Upload Result
+      # 上传选股结果、折线图和运行日志
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: selected_stocks
+          name: selected_stocks_results
           path: |
             selected_stocks.csv
             selected_stock_count.png
+            run_log.txt
