@@ -4,6 +4,7 @@ import datetime
 import matplotlib.pyplot as plt
 import os
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # -----------------------------
 # 配置文件
@@ -11,9 +12,9 @@ from tqdm import tqdm
 DATA_DIR = "stock_data"
 SELECTED_FILE = "selected_stocks.csv"
 HISTORY_FILE = "stock_count_history.csv"
-MIN_MARKET_CAP = 10  # 单位：亿
+MIN_MARKET_CAP = 10  # 亿
 LIST_DAYS = 60       # 上市天数下限
-
+MAX_THREADS = 10     # 并行线程数
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # -----------------------------
@@ -42,12 +43,19 @@ def check_market_cap_and_listdays(stock_info):
 def select_stock(df, stock_info):
     df = calculate_indicators(df)
     latest = df.iloc[-1]
+
+    # 剔除未交易（成交量为0）和 ST 股票
+    if latest['volume'] == 0:
+        return False
+    if 'ST' in stock_info['名称'].upper():
+        return False
+
     条件 = (latest['RSI1']>70) & (latest['WR1']<20) & (latest['WR2']<20)
     条件 &= check_market_cap_and_listdays(stock_info)
     return 条件
 
 # -----------------------------
-# 获取股票列表和历史行情
+# 获取股票列表和历史行情（前复权）
 # -----------------------------
 def get_stock_list():
     print("[信息] 正在获取股票列表...")
@@ -58,13 +66,39 @@ def get_stock_list():
 
 def get_stock_history(code, start_date, end_date):
     try:
-        df = ak.stock_zh_a_daily(symbol=code, start_date=start_date, end_date=end_date)
+        df = ak.stock_zh_a_daily(symbol=code, start_date=start_date, end_date=end_date, adjust="qfq")
         df = df.rename(columns={'日期':'date','开盘':'open','收盘':'close','最高':'high','最低':'low','成交量':'volume'})
         df = df.sort_values('date')
         return df[['date','open','high','low','close','volume']]
     except Exception as e:
         print(f"[错误] 获取 {code} 历史数据失败: {e}")
         return pd.DataFrame()
+
+# -----------------------------
+# 并行处理单只股票
+# -----------------------------
+def process_stock(row, start_date, end_date):
+    code = row['code']
+    df = get_stock_history(code, start_date, end_date)
+    if df.empty:
+        return []
+
+    stock_info = {
+        '名称': row['name'],
+        '市值': 1e9,        # 示例市值，可根据需求修改
+        '上市天数': 120     # 示例上市天数
+    }
+
+    结果 = []
+    for date in df['date'].tolist():
+        sub_df = df[df['date']<=date]
+        try:
+            if select_stock(sub_df, stock_info):
+                结果.append({'日期': date, '股票代码': code, '名称': row['name']})
+        except Exception as e:
+            print(f"[警告] {code} 在 {date} 选股异常: {e}")
+            continue
+    return 结果
 
 # -----------------------------
 # 主程序
@@ -74,46 +108,27 @@ def main():
     stock_list = get_stock_list()
     history_records = []
 
-    # 首次运行：补前21个交易日
     start_date = (today - datetime.timedelta(days=40)).strftime('%Y%m%d')
     end_date = today.strftime('%Y%m%d')
-
     print(f"[信息] 正在处理股票历史行情，日期区间：{start_date} - {end_date}")
 
-    for idx, row in tqdm(stock_list.iterrows(), total=len(stock_list), desc="正在处理股票"):
-        code = row['code']
-        df = get_stock_history(code, start_date, end_date)
-        if df.empty:
-            continue
+    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+        futures = {executor.submit(process_stock, row, start_date, end_date): row['code'] for idx, row in stock_list.iterrows()}
+        for future in tqdm(as_completed(futures), total=len(futures), desc="正在处理股票"):
+            result = future.result()
+            if result:
+                history_records.extend(result)
 
-        # 股票信息示例
-        stock_info = {
-            '市值': 1e9,        # 示例：100亿
-            '上市天数': 120     # 示例：120天
-        }
-
-        # 遍历每个交易日
-        for date in df['date'].tolist():
-            sub_df = df[df['date']<=date]
-            try:
-                if select_stock(sub_df, stock_info):
-                    history_records.append({'日期': date, '股票代码': code})
-            except Exception as e:
-                print(f"[警告] {code} 在 {date} 选股计算异常: {e}")
-                continue
-
-    # 汇总每天选股数量
-    history_df = pd.DataFrame(history_records)
-    if history_df.empty:
+    if not history_records:
         print("[提示] 没有符合条件的股票")
         return
 
+    history_df = pd.DataFrame(history_records)
     daily_count = history_df.groupby('日期')['股票代码'].count().reset_index()
     daily_count = daily_count.sort_values('日期')
     daily_count.to_csv(HISTORY_FILE, index=False, encoding='utf-8-sig')
     print(f"[信息] 每日选股数量已保存到 {HISTORY_FILE}")
 
-    # 绘制折线图
     plt.figure(figsize=(12,6))
     plt.plot(daily_count['日期'], daily_count['股票代码'], marker='o')
     plt.title("每日选股数量折线图")
