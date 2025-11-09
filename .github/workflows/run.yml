@@ -23,10 +23,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: 创建数据目录
+        run: mkdir -p stock_data
+
       - name: Run Stock Selection Script
         run: python auto_select_stock.py
 
-      - name: Upload Result
+      - name: 上传结果文件
         uses: actions/upload-artifact@v4
         with:
           name: selected_stocks
