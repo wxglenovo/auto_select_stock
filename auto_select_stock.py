@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import os
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import numpy as np
 
 # -----------------------------
 # 配置文件
@@ -15,6 +16,7 @@ HISTORY_FILE = "stock_count_history.csv"
 MIN_MARKET_CAP = 10  # 亿
 LIST_DAYS = 60       # 上市天数下限
 MAX_THREADS = 10     # 并行线程数
+DAYS_HISTORY = 40    # 获取历史天数，首次补全至少21个交易日
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # -----------------------------
@@ -75,10 +77,25 @@ def get_stock_history(code, start_date, end_date):
         return pd.DataFrame()
 
 # -----------------------------
+# 交易日过滤器（跳过周末和节假日）
+# -----------------------------
+def get_recent_trade_dates(n_days):
+    trade_dates = []
+    today = datetime.date.today()
+    delta = datetime.timedelta(days=1)
+    while len(trade_dates) < n_days:
+        if today.weekday() < 5:  # 周一到周五
+            trade_dates.append(today.strftime("%Y%m%d"))
+        today -= delta
+    return sorted(trade_dates)
+
+# -----------------------------
 # 并行处理单只股票
 # -----------------------------
-def process_stock(row, start_date, end_date):
+def process_stock(row, trade_dates):
     code = row['code']
+    start_date = trade_dates[0]
+    end_date = trade_dates[-1]
     df = get_stock_history(code, start_date, end_date)
     if df.empty:
         return []
@@ -90,8 +107,10 @@ def process_stock(row, start_date, end_date):
     }
 
     结果 = []
-    for date in df['date'].tolist():
+    for date in trade_dates:
         sub_df = df[df['date']<=date]
+        if sub_df.empty:
+            continue
         try:
             if select_stock(sub_df, stock_info):
                 结果.append({'日期': date, '股票代码': code, '名称': row['name']})
@@ -104,16 +123,15 @@ def process_stock(row, start_date, end_date):
 # 主程序
 # -----------------------------
 def main():
-    today = datetime.date.today()
+    print("[信息] 开始自动选股任务...")
+    trade_dates = get_recent_trade_dates(DAYS_HISTORY)
     stock_list = get_stock_list()
     history_records = []
 
-    start_date = (today - datetime.timedelta(days=40)).strftime('%Y%m%d')
-    end_date = today.strftime('%Y%m%d')
-    print(f"[信息] 正在处理股票历史行情，日期区间：{start_date} - {end_date}")
+    print(f"[信息] 最近 {DAYS_HISTORY} 个交易日（自动跳过周末/节假日）: {trade_dates}")
 
     with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-        futures = {executor.submit(process_stock, row, start_date, end_date): row['code'] for idx, row in stock_list.iterrows()}
+        futures = {executor.submit(process_stock, row, trade_dates): row['code'] for idx, row in stock_list.iterrows()}
         for future in tqdm(as_completed(futures), total=len(futures), desc="正在处理股票"):
             result = future.result()
             if result:
@@ -140,8 +158,7 @@ def main():
     plt.savefig("selected_stock_count.png")
     plt.show()
     print("[信息] 折线图生成完成: selected_stock_count.png")
+    print("[信息] 自动选股任务完成。")
 
 if __name__ == "__main__":
-    print("[信息] 开始自动选股任务...")
     main()
-    print("[信息] 自动选股任务完成。")
