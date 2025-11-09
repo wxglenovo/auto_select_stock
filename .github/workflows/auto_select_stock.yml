@@ -2,7 +2,7 @@ name: Auto Select Stock
 
 on:
   schedule:
-    - cron: "0 18 * * *"  # 每天北京时间18点自动运行
+    - cron: "0 18 * * *"  # 每天18点盘后运行
   workflow_dispatch:
 
 jobs:
@@ -23,15 +23,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Stock Selection Script
+      - name: Run Auto Select Stock
         run: |
           python auto_select_stock.py
 
-      - name: Upload Results
+      - name: Upload Selected Stocks CSV
         uses: actions/upload-artifact@v4
         with:
-          name: stock_selection_results
-          path: |
-            selected_stocks.csv
-            selected_stock_count.png
-            stock_count_history.csv
+          name: selected_stocks
+          path: output/selected_stocks.csv
+
+      - name: Upload Stock Count Plot
+        uses: actions/upload-artifact@v4
+        with:
+          name: selected_stock_count
+          path: output/selected_stock_count.png
+
+      - name: Upload Stock Count History
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock_count_history
+          path: output/stock_count_history.csv
