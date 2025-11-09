@@ -3,6 +3,7 @@ import pandas as pd
 import datetime
 import matplotlib.pyplot as plt
 import os
+from tqdm import tqdm
 
 # -----------------------------
 # 配置文件
@@ -19,50 +20,54 @@ os.makedirs(DATA_DIR, exist_ok=True)
 # 选股公式逻辑
 # -----------------------------
 def calculate_indicators(df):
-    # RSI
     N1, N2, N3 = 9, 10, 20
-    df['LC'] = df['close'].shift(1)
-    df['diff'] = df['close'] - df['LC']
-    df['up'] = df['diff'].apply(lambda x: max(x, 0))
-    df['down'] = df['diff'].abs()
-    df['RSI1'] = df['up'].rolling(N1).mean() / df['down'].rolling(N1).mean() * 100
+    df['昨日收盘'] = df['close'].shift(1)
+    df['涨跌'] = df['close'] - df['昨日收盘']
+    df['上涨'] = df['涨跌'].apply(lambda x: max(x, 0))
+    df['下跌'] = df['涨跌'].abs()
+    df['RSI1'] = df['上涨'].rolling(N1).mean() / df['下跌'].rolling(N1).mean() * 100
 
-    # WR指标
-    df['HHV_N2'] = df['high'].rolling(N2).max()
-    df['LLV_N2'] = df['low'].rolling(N2).min()
-    df['WR1'] = 100*(df['HHV_N2']-df['close'])/(df['HHV_N2']-df['LLV_N2'])
+    df['最高N2'] = df['high'].rolling(N2).max()
+    df['最低N2'] = df['low'].rolling(N2).min()
+    df['WR1'] = 100*(df['最高N2']-df['close'])/(df['最高N2']-df['最低N2'])
 
-    df['HHV_N3'] = df['high'].rolling(N3).max()
-    df['LLV_N3'] = df['low'].rolling(N3).min()
-    df['WR2'] = 100*(df['HHV_N3']-df['close'])/(df['HHV_N3']-df['LLV_N3'])
+    df['最高N3'] = df['high'].rolling(N3).max()
+    df['最低N3'] = df['low'].rolling(N3).min()
+    df['WR2'] = 100*(df['最高N3']-df['close'])/(df['最高N3']-df['最低N3'])
     return df
 
 def check_market_cap_and_listdays(stock_info):
-    return (stock_info['list_days'] >= LIST_DAYS) & (stock_info['market_cap'] >= MIN_MARKET_CAP*1e8)
+    return (stock_info['上市天数'] >= LIST_DAYS) & (stock_info['市值'] >= MIN_MARKET_CAP*1e8)
 
 def select_stock(df, stock_info):
     df = calculate_indicators(df)
     latest = df.iloc[-1]
-    condition = (latest['RSI1']>70) & (latest['WR1']<20) & (latest['WR2']<20)
-    condition &= check_market_cap_and_listdays(stock_info)
-    return condition
+    条件 = (latest['RSI1']>70) & (latest['WR1']<20) & (latest['WR2']<20)
+    条件 &= check_market_cap_and_listdays(stock_info)
+    return 条件
 
 # -----------------------------
 # 获取股票列表和历史行情
 # -----------------------------
 def get_stock_list():
+    print("[信息] 正在获取股票列表...")
     stock_list = ak.stock_info_a_code_name()
     stock_list['code'] = stock_list['code'].astype(str)
+    print(f"[信息] 共获取到 {len(stock_list)} 只股票")
     return stock_list
 
 def get_stock_history(code, start_date, end_date):
-    df = ak.stock_zh_a_daily(symbol=code, start_date=start_date, end_date=end_date)
-    df = df.rename(columns={'日期':'date','开盘':'open','收盘':'close','最高':'high','最低':'low','成交量':'volume'})
-    df = df.sort_values('date')
-    return df[['date','open','high','low','close','volume']]
+    try:
+        df = ak.stock_zh_a_daily(symbol=code, start_date=start_date, end_date=end_date)
+        df = df.rename(columns={'日期':'date','开盘':'open','收盘':'close','最高':'high','最低':'low','成交量':'volume'})
+        df = df.sort_values('date')
+        return df[['date','open','high','low','close','volume']]
+    except Exception as e:
+        print(f"[错误] 获取 {code} 历史数据失败: {e}")
+        return pd.DataFrame()
 
 # -----------------------------
-# 计算前21个交易日选股数量
+# 主程序
 # -----------------------------
 def main():
     today = datetime.date.today()
@@ -73,17 +78,18 @@ def main():
     start_date = (today - datetime.timedelta(days=40)).strftime('%Y%m%d')
     end_date = today.strftime('%Y%m%d')
 
-    for idx, row in stock_list.iterrows():
+    print(f"[信息] 正在处理股票历史行情，日期区间：{start_date} - {end_date}")
+
+    for idx, row in tqdm(stock_list.iterrows(), total=len(stock_list), desc="正在处理股票"):
         code = row['code']
-        try:
-            df = get_stock_history(code, start_date, end_date)
-        except:
+        df = get_stock_history(code, start_date, end_date)
+        if df.empty:
             continue
 
-        # 股票信息
+        # 股票信息示例
         stock_info = {
-            'market_cap': 1e9, # 示例：假设100亿市值
-            'list_days': 120   # 示例：上市天数
+            '市值': 1e9,        # 示例：100亿
+            '上市天数': 120     # 示例：120天
         }
 
         # 遍历每个交易日
@@ -91,22 +97,26 @@ def main():
             sub_df = df[df['date']<=date]
             try:
                 if select_stock(sub_df, stock_info):
-                    history_records.append({'date': date, 'code': code})
-            except:
+                    history_records.append({'日期': date, '股票代码': code})
+            except Exception as e:
+                print(f"[警告] {code} 在 {date} 选股计算异常: {e}")
                 continue
 
     # 汇总每天选股数量
     history_df = pd.DataFrame(history_records)
-    daily_count = history_df.groupby('date')['code'].count().reset_index()
-    daily_count = daily_count.sort_values('date')
-    daily_count.to_csv(HISTORY_FILE, index=False, encoding='utf-8-sig')
+    if history_df.empty:
+        print("[提示] 没有符合条件的股票")
+        return
 
-    # -----------------------------
+    daily_count = history_df.groupby('日期')['股票代码'].count().reset_index()
+    daily_count = daily_count.sort_values('日期')
+    daily_count.to_csv(HISTORY_FILE, index=False, encoding='utf-8-sig')
+    print(f"[信息] 每日选股数量已保存到 {HISTORY_FILE}")
+
     # 绘制折线图
-    # -----------------------------
     plt.figure(figsize=(12,6))
-    plt.plot(daily_count['date'], daily_count['code'], marker='o')
-    plt.title("每日选股数量")
+    plt.plot(daily_count['日期'], daily_count['股票代码'], marker='o')
+    plt.title("每日选股数量折线图")
     plt.xlabel("日期")
     plt.ylabel("选股数量")
     plt.xticks(rotation=45)
@@ -114,7 +124,9 @@ def main():
     plt.tight_layout()
     plt.savefig("selected_stock_count.png")
     plt.show()
-    print("[✔] 选股数量折线图生成完成: selected_stock_count.png")
+    print("[信息] 折线图生成完成: selected_stock_count.png")
 
 if __name__ == "__main__":
+    print("[信息] 开始自动选股任务...")
     main()
+    print("[信息] 自动选股任务完成。")
