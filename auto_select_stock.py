@@ -1,143 +1,150 @@
-# tdx_data_loader.py
+# tdx_data_downloader.py
 # -*- coding: utf-8 -*-
 
 import os
-import zipfile
 import requests
+from bs4 import BeautifulSoup
+from zipfile import ZipFile
 import pandas as pd
 from io import BytesIO
-from tqdm import tqdm
+import logging
 
-# ==============================
-# 配置区
-# ==============================
-TDX_ZIP_URL = "https://data.tdx.com.cn/vipdoc/hsjday.zip"  # 通达信日线数据包
-LOCAL_DIR = "tdx_data"  # 本地存储目录
-LOG_FILE = "tdx_download.log"
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
 
-# ==============================
-# 日志打印函数
-# ==============================
-def log(msg):
-    print(f"[{pd.Timestamp.now()}] {msg}")
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"[{pd.Timestamp.now()}] {msg}\n")
+# 配置
+BASE_DIR = "tdx_data"
+ZIP_FILENAME = "hsjday.zip"
+EXTRACT_DIR = os.path.join(BASE_DIR, "day_files")
 
-# ==============================
-# 下载 ZIP 文件
-# ==============================
-def download_zip(url=TDX_ZIP_URL, local_dir=LOCAL_DIR):
-    os.makedirs(local_dir, exist_ok=True)
-    local_path = os.path.join(local_dir, "hsjday.zip")
-    log(f"开始下载通达信日线数据包: {url}")
-    
+# -----------------------------
+# 1. 自动获取最新 ZIP 链接
+# -----------------------------
+def get_latest_zip_url():
+    url = "https://www.tdx.com.cn/article/vipdata.html"
     try:
-        resp = requests.get(url, stream=True, timeout=60)
-        resp.raise_for_status()
-        total_size = int(resp.headers.get('content-length', 0))
-        with open(local_path, "wb") as f, tqdm(
-            desc="下载中",
-            total=total_size,
-            unit='B',
-            unit_scale=True,
-            unit_divisor=1024,
-        ) as bar:
-            for data in resp.iter_content(chunk_size=1024*1024):
-                f.write(data)
-                bar.update(len(data))
-        log(f"下载完成，保存路径: {local_path}")
-        return local_path
+        r = requests.get(url, timeout=20)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        for a in soup.find_all("a", href=True):
+            if "hsjday.zip" in a['href']:
+                href = a['href']
+                if href.startswith("http"):
+                    return href
+                else:
+                    # 相对路径拼接主域名
+                    return "https://www.tdx.com.cn" + href
     except Exception as e:
-        log(f"[错误] 下载失败: {e}")
+        logging.error(f"获取最新 ZIP 链接失败: {e}")
+    return None
+
+# -----------------------------
+# 2. 下载 ZIP 包
+# -----------------------------
+def download_zip(zip_url):
+    try:
+        logging.info(f"开始下载: {zip_url}")
+        r = requests.get(zip_url, timeout=60)
+        r.raise_for_status()
+        os.makedirs(BASE_DIR, exist_ok=True)
+        zip_path = os.path.join(BASE_DIR, ZIP_FILENAME)
+        with open(zip_path, "wb") as f:
+            f.write(r.content)
+        logging.info(f"下载完成: {zip_path}")
+        return zip_path
+    except Exception as e:
+        logging.error(f"下载失败: {e}")
         return None
 
-# ==============================
-# 解压 ZIP 文件
-# ==============================
-def unzip_file(zip_path, extract_dir=LOCAL_DIR):
-    log(f"开始解压 ZIP 文件: {zip_path}")
+# -----------------------------
+# 3. 解压 ZIP 包
+# -----------------------------
+def unzip_file(zip_path):
     try:
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            zf.extractall(extract_dir)
-        log(f"解压完成，文件存放目录: {extract_dir}")
-        return extract_dir
+        logging.info(f"开始解压: {zip_path}")
+        os.makedirs(EXTRACT_DIR, exist_ok=True)
+        with ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(EXTRACT_DIR)
+        logging.info(f"解压完成, 文件在: {EXTRACT_DIR}")
+        return EXTRACT_DIR
     except Exception as e:
-        log(f"[错误] 解压失败: {e}")
+        logging.error(f"解压失败: {e}")
         return None
 
-# ==============================
-# 解析单只股票的日线数据
-# 通达信格式：32字节/记录，可用 numpy.fromfile 或 struct unpack
-# 假设这里使用 struct unpack 解析
-# ==============================
-import struct
-
-def parse_stock_file(file_path):
-    """
-    解析单只股票文件，返回 DataFrame
-    """
-    log(f"开始解析股票文件: {file_path}")
-    columns = ["日期", "开盘", "最高", "最低", "收盘", "成交量", "成交额"]
-    records = []
-
+# -----------------------------
+# 4. 解析 DAY 文件为 DataFrame
+# -----------------------------
+def parse_day_file(day_file):
+    """解析通达信 .DAY 文件，返回 DataFrame"""
     try:
-        with open(file_path, "rb") as f:
-            while True:
-                data = f.read(32)
-                if not data:
-                    break
-                if len(data) < 32:
-                    break
-                # 通达信日线数据格式：年月日、开高低收、成交量、成交额
-                date, open_, high, low, close, vol, amount = struct.unpack('<IIIIIII', data)
-                # 转换日期
-                year = date % 10000
-                month = (date // 10000) % 100
-                day = (date // 1000000) % 100
-                date_str = f"20{year:02d}-{month:02d}-{day:02d}"
-                records.append([date_str, open_/100, high/100, low/100, close/100, vol, amount/100])
-        df = pd.DataFrame(records, columns=columns)
-        df["日期"] = pd.to_datetime(df["日期"])
-        df.sort_values("日期", inplace=True)
-        df.reset_index(drop=True, inplace=True)
+        import struct
+        # 通达信 .DAY 文件格式: 每32字节 = 1条记录
+        # 前4字节日期, 4字节开盘价, 4字节最高价, 4字节最低价, 4字节收盘价, 4字节成交量, 4字节成交金额, 4字节未知
+        record_size = 32
+        with open(day_file, "rb") as f:
+            content = f.read()
+        n = len(content) // record_size
+        records = []
+        for i in range(n):
+            record = content[i*record_size:(i+1)*record_size]
+            date, open_, high, low, close, vol, amount, _ = struct.unpack('<IIIIIIII', record)
+            # 日期转换
+            yyyy = date // 10000
+            mm = (date % 10000) // 100
+            dd = date % 100
+            date_str = f"{yyyy:04d}-{mm:02d}-{dd:02d}"
+            records.append({
+                "日期": date_str,
+                "开盘": open_/100,
+                "最高": high/100,
+                "最低": low/100,
+                "收盘": close/100,
+                "成交量": vol,
+                "成交金额": amount
+            })
+        df = pd.DataFrame(records)
         return df
     except Exception as e:
-        log(f"[错误] 解析失败 {file_path}: {e}")
-        return pd.DataFrame(columns=columns)
+        logging.error(f"解析文件 {day_file} 失败: {e}")
+        return pd.DataFrame()
 
-# ==============================
-# 批量解析股票数据
-# ==============================
-def parse_all_stocks(data_dir=LOCAL_DIR):
-    all_files = []
-    for root, dirs, files in os.walk(data_dir):
-        for file in files:
-            if file.endswith(".day"):
-                all_files.append(os.path.join(root, file))
-    
-    log(f"发现 {len(all_files)} 支股票文件，开始解析...")
-
+# -----------------------------
+# 5. 批量解析目录中的所有 DAY 文件
+# -----------------------------
+def parse_all_day_files(extract_dir):
     all_data = {}
-    for file_path in tqdm(all_files, desc="解析中"):
-        stock_code = os.path.basename(file_path).replace(".day", "")
-        df = parse_stock_file(file_path)
-        if not df.empty:
-            all_data[stock_code] = df
-    log(f"解析完成，成功解析 {len(all_data)} 支股票")
+    for filename in os.listdir(extract_dir):
+        if filename.upper().endswith(".DAY"):
+            code = filename[:6]  # 文件名前6位为股票代码
+            day_path = os.path.join(extract_dir, filename)
+            df = parse_day_file(day_path)
+            if not df.empty:
+                all_data[code] = df
+    logging.info(f"解析完成，总共股票: {len(all_data)}")
     return all_data
 
-# ==============================
-# 主函数
-# ==============================
-def main():
-    zip_path = download_zip()
-    if zip_path:
-        extract_dir = unzip_file(zip_path)
-        if extract_dir:
-            stock_data = parse_all_stocks(extract_dir)
-            log(f"数据准备完成，可供选股使用")
-            # 示例保存为 pickle
-            pd.to_pickle(stock_data, os.path.join(extract_dir, "tdx_all_stocks.pkl"))
+# -----------------------------
+# 6. 主函数：一键抓取+下载+解析
+# -----------------------------
+def fetch_and_parse_tdx():
+    zip_url = get_latest_zip_url()
+    if not zip_url:
+        logging.error("无法获取最新 ZIP 链接")
+        return {}
+    zip_path = download_zip(zip_url)
+    if not zip_path:
+        return {}
+    extract_dir = unzip_file(zip_path)
+    if not extract_dir:
+        return {}
+    data_dict = parse_all_day_files(extract_dir)
+    return data_dict
 
+# -----------------------------
+# 测试运行
+# -----------------------------
 if __name__ == "__main__":
-    main()
+    all_stock_data = fetch_and_parse_tdx()
+    # 打印某支股票前5条记录
+    for code, df in all_stock_data.items():
+        logging.info(f"{code} 前5条记录:\n{df.head()}")
+        break
