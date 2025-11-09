@@ -1,105 +1,189 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os
+import akshare as ak
 import pandas as pd
-from datetime import datetime
-from tqdm import tqdm
+import numpy as np
+import datetime
+import os
+import time
+import json
 import matplotlib.pyplot as plt
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
 # ===============================
-# 配置区
+# 配置
 # ===============================
-TDX_DIR = "./tdx_data"  # 本地 TDX vipdoc 目录
-OUTPUT_DIR = "./output"
-HISTORY_FILE = os.path.join(OUTPUT_DIR, "selected_stock_count.csv")
-
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# ===============================
-# 读取所有 .day 文件
-# ===============================
-def get_all_day_files(tdx_dir):
-    day_files = []
-    for root, dirs, files in os.walk(tdx_dir):
-        for f in files:
-            if f.endswith(".day"):
-                day_files.append(os.path.join(root, f))
-    return day_files
+HISTORY_DIR = "history"
+RESULT_CSV = "selected_stocks.csv"
+COUNT_PNG = "selected_stock_count.png"
+RECORD_FILE = "selection_count.json"
+THREADS = 25
+TRADE_DAYS = 21
 
 # ===============================
-# 解析 .day 文件（示例解析，实际可用 pytdx）
+# 工具函数
 # ===============================
-def parse_day_file(file_path):
-    # 这里可以用 pytdx 或者自定义解析逻辑
-    # 返回字典 { '代码': code, '日期': date, '开盘': open, '收盘': close, ... }
-    # 示例只返回代码
-    code = os.path.basename(file_path).split(".")[0]
-    return {"代码": code}
+def log(msg):
+    print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+
+def today_str():
+    return datetime.date.today().strftime("%Y-%m-%d")
+
+def is_weekend_or_holiday():
+    d = datetime.date.today()
+    if d.weekday() >= 5:
+        return True
+    holiday_list = ["2025-01-01", "2025-02-01"]  # 可扩展
+    return today_str() in holiday_list
 
 # ===============================
-# 下载/读取历史行情（本地 TDX 已有，无需下载）
+# 获取股票列表（沪深 + 北交所）
 # ===============================
-def load_stock_data():
-    day_files = get_all_day_files(TDX_DIR)
-    data = []
-    for f in tqdm(day_files, desc="读取TDX .day 文件"):
+def get_stock_list():
+    try:
+        log("开始获取沪深A股列表...")
+        df_a = ak.stock_zh_a_spot_em()
+        df_a = df_a[~df_a["名称"].str.contains("ST")]
+        df_a = df_a[df_a["最新价"] > 0]
+        df_a = df_a[df_a["代码"].str.len() == 6]
+
+        log("尝试获取北交所股票列表...")
         try:
-            row = parse_day_file(f)
-            data.append(row)
-        except Exception as e:
-            print(f"[错误] 解析 {f} 失败: {e}")
-    df = pd.DataFrame(data)
-    return df
+            df_bj = ak.stock_info_bj_name()
+            df_bj.columns = ["代码", "名称"]
+        except:
+            log("⚠ 获取北交所失败，跳过")
+            df_bj = pd.DataFrame(columns=["代码", "名称"])
+
+        df = pd.concat([df_a[["代码", "名称"]], df_bj], ignore_index=True)
+        df = df.drop_duplicates(subset="代码")
+        log(f"已获取股票总数：{len(df)}")
+        return df
+    except Exception as e:
+        log(f"[错误] 获取股票失败：{e}")
+        return pd.DataFrame()
 
 # ===============================
-# 简单选股逻辑示例
+# 下载历史行情（单只）
 # ===============================
-def select_stocks(df):
-    # 这里可以替换为你的选股逻辑
-    return df.head(50)  # 示例选前50只
+def download_stock(code):
+    try:
+        file = f"{HISTORY_DIR}/{code}.csv"
+        if os.path.exists(file):
+            return code
+
+        df = ak.stock_zh_a_hist(symbol=code, period="daily", adjust="qfq")
+        if df.empty:
+            return None
+
+        df.to_csv(file, index=False)
+        return code
+    except:
+        return None
 
 # ===============================
-# 绘制选股数量历史
+# 多线程下载行情
 # ===============================
-def plot_count_history(df_selected):
-    today = datetime.today().strftime("%Y-%m-%d")
-    if os.path.exists(HISTORY_FILE):
-        df_history = pd.read_csv(HISTORY_FILE)
+def download_all(df):
+    os.makedirs(HISTORY_DIR, exist_ok=True)
+
+    log("开始下载历史行情（多线程）...")
+    ok, fail = [], []
+    with ThreadPoolExecutor(max_workers=THREADS) as pool:
+        tasks = {pool.submit(download_stock, c): c for c in df["代码"]}
+        for future in tqdm(as_completed(tasks), total=len(tasks), desc="下载中"):
+            code = tasks[future]
+            result = future.result()
+            if result:
+                ok.append(result)
+            else:
+                fail.append(code)
+
+    if fail:
+        log(f"⚠ 下载失败 {len(fail)} 只股票，已跳过")
+    return ok
+
+# ===============================
+# 简易选股策略（示例：收盘 > 20日均线）
+# ===============================
+def select(df):
+    result = []
+    for _, row in df.iterrows():
+        code = row["代码"]
+        file = f"{HISTORY_DIR}/{code}.csv"
+        if not os.path.exists(file):
+            continue
+        hist = pd.read_csv(file)
+        if len(hist) < 20:
+            continue
+        close = hist["收盘"].iloc[-1]
+        ma20 = hist["收盘"].tail(20).mean()
+        if close > ma20:
+            result.append(row)
+    return pd.DataFrame(result)
+
+# ===============================
+# 记录选股数量（自动补齐 21 天）
+# ===============================
+def record_count(today_num):
+    if os.path.exists(RECORD_FILE):
+        with open(RECORD_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
     else:
-        df_history = pd.DataFrame(columns=["日期", "数量"])
+        data = {}
 
-    df_history = pd.concat([df_history, pd.DataFrame([{"日期": today, "数量": len(df_selected)}])], ignore_index=True)
-    df_history.to_csv(HISTORY_FILE, index=False)
+    data[today_str()] = today_num
+    data = dict(sorted(data.items())[-TRADE_DAYS:])
 
-    plt.figure(figsize=(8,4))
-    plt.plot(pd.to_datetime(df_history["日期"]), df_history["数量"], marker='o')
-    plt.title("选股数量历史")
-    plt.xlabel("日期")
-    plt.ylabel("数量")
+    with open(RECORD_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return data
+
+# ===============================
+# 生成折线图
+# ===============================
+def plot_count(data):
+    plt.figure(figsize=(10, 5))
+    x = list(data.keys())
+    y = list(data.values())
+    plt.plot(x, y, marker="o")
     plt.xticks(rotation=45)
+    plt.title("最近21个交易日选股数量")
+    plt.xlabel("日期")
+    plt.ylabel("选股数")
     plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUT_DIR, "selected_stock_count.png"))
+    plt.savefig(COUNT_PNG)
     plt.close()
 
 # ===============================
-# 主函数
+# 主程序
 # ===============================
 def main():
-    print("[INFO] 开始运行自动选股程序")
-    df_stocks = load_stock_data()
-    if df_stocks.empty:
-        print("[错误] 股票列表为空，程序退出")
+    log("🚀 自动选股程序启动")
+
+    if is_weekend_or_holiday():
+        log("今天是周末或节假日，程序退出")
         return
 
-    print(f"[INFO] 股票列表获取完成，总数: {len(df_stocks)}")
-    df_selected = select_stocks(df_stocks)
-    print(f"[INFO] 选股完成，总数: {len(df_selected)}")
+    df = get_stock_list()
+    if df.empty:
+        log("❌ 无股票列表，退出")
+        return
 
-    plot_count_history(df_selected)
-    df_selected.to_csv(os.path.join(OUTPUT_DIR, "selected_stocks.csv"), index=False)
-    print("[INFO] 文件保存完成")
+    download_all(df)
+
+    log("开始执行选股策略…")
+    selected = select(df)
+    selected.to_csv(RESULT_CSV, index=False, encoding="utf-8-sig")
+    log(f"✅ 今日选出 {len(selected)} 只股票，已保存至 {RESULT_CSV}")
+
+    count = record_count(len(selected))
+    plot_count(count)
+    log(f"📈 选股数量折线图已生成：{COUNT_PNG}")
+
+    log("✅ 程序结束")
 
 if __name__ == "__main__":
     main()
