@@ -11,7 +11,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -23,17 +23,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Download TDX historical data
-        run: |
-          mkdir -p tdx_data
-          TDX_URL="https://data.tdx.com.cn/vipdoc/hsjday.zip"
-          wget -O tdx_data/hsjday.zip $TDX_URL
-          unzip -o tdx_data/hsjday.zip -d tdx_data || true
-
-      - name: Run auto select stock
+      - name: Run Auto Select Stock
         run: python auto_select_stock.py
 
-      - name: Upload results
+      - name: Upload Results
         uses: actions/upload-artifact@v4
         with:
           name: selected_stocks_results
