@@ -2,7 +2,7 @@ name: Auto Select Stock
 
 on:
   schedule:
-    - cron: "0 6 * * *"  # 每天早6点自动跑
+    - cron: "0 18 * * *"  # 每天收盘后跑一次
   workflow_dispatch:
 
 jobs:
@@ -10,35 +10,26 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 拉取仓库代码
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 设置 Python 环境
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      # 安装依赖
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install akshare pandas matplotlib tqdm
+          pip install akshare pandas matplotlib numpy
 
-      # 运行选股脚本并输出日志到文件
       - name: Run Stock Selection Script
-        run: |
-          echo "[信息] 开始运行选股脚本..." 
-          python auto_select_stock.py 2>&1 | tee run_log.txt
-          echo "[信息] 脚本运行结束。日志已保存到 run_log.txt"
+        run: python auto_select_stock.py
 
-      # 上传选股结果、折线图和运行日志
-      - name: Upload Artifacts
+      - name: Upload Result
         uses: actions/upload-artifact@v4
         with:
-          name: selected_stocks_results
+          name: selected_stocks
           path: |
             selected_stocks.csv
             selected_stock_count.png
-            run_log.txt
