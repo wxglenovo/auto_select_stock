@@ -29,19 +29,20 @@ jobs:
       # 4. 下载并解析通达信盘后数据
       - name: Download & parse TDX data
         run: |
-          python -c "
-from tdx_data_downloader import fetch_and_parse_tdx
+          python - <<'EOF'
 import pickle
+from tdx_data_downloader import fetch_and_parse_tdx
+
 all_stock_data = fetch_and_parse_tdx()
 with open('tdx_all_stock_data.pkl', 'wb') as f:
     pickle.dump(all_stock_data, f)
+
 print(f'Total stocks fetched: {len(all_stock_data)}')
-"
+EOF
 
       # 5. 运行选股脚本
       - name: Run auto select stock
-        run: |
-          python auto_select_stock.py
+        run: python auto_select_stock.py
 
       # 6. 上传选股结果
       - name: Upload results
