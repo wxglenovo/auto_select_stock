@@ -3,7 +3,7 @@ name: Auto Select Stock
 on:
   schedule:
     - cron: "0 6 * * *"  # 每天早6点自动跑
-  workflow_dispatch:     # 手动执行触发
+  workflow_dispatch:
 
 jobs:
   run:
@@ -13,21 +13,23 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
       - name: Install Dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Script
-        run: |
-          python auto_select_stock.py
+      - name: Run Stock Selection Script
+        run: python auto_select_stock.py
 
       - name: Upload Result
         uses: actions/upload-artifact@v4
         with:
           name: selected_stocks
-          path: selected_stocks.csv
+          path: |
+            selected_stocks.csv
+            selected_stock_count.png
