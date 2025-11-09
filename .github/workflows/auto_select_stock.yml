@@ -2,7 +2,7 @@ name: Auto Select Stock
 
 on:
   schedule:
-    - cron: "0 6 * * *"  # 每天早6点
+    - cron: "0 6 * * *"
   workflow_dispatch:
 
 jobs:
@@ -33,4 +33,3 @@ jobs:
           path: |
             selected_stocks.csv
             selected_stock_count.png
-            stock_count_history.csv
