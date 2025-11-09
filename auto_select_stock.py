@@ -1,157 +1,173 @@
-# auto_select_stock.py
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import os
 import pandas as pd
+import numpy as np
 import akshare as ak
-from concurrent.futures import ThreadPoolExecutor
-from tqdm import tqdm
-import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
-import time
+import matplotlib.pyplot as plt
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ------------------- 配置 -------------------
-DATA_DIR = r"./stock_data"                 # 历史行情存放目录
-STOCK_LIST_FILE = r"./all_stock_list.csv" # 股票列表
-SELECTED_FILE = r"./selected_stocks.csv"  # 每日选股结果
-COUNT_HISTORY_FILE = r"./stock_count_history.csv"  # 选股数量历史
-THREADS = 10  # 并行线程数
-MIN_MARKET_VALUE = 1e9  # 最小市值
-MIN_LISTED_DAYS = 30    # 最小上市天数
+# ===============================
+# 配置
+# ===============================
+HISTORY_DIR = "history_data"
+OUTPUT_DIR = "output"
+TRADE_DAYS_HISTORY = 21  # 首次补齐最近21个交易日
+MIN_MKT_CAP = 2  # 最小市值，单位亿
+MIN_LIST_DAYS = 60  # 最小上市天数
+THREADS = 10
 
-# ------------------- 工具函数 -------------------
-def ensure_dir(path):
-    if not os.path.exists(path):
-        os.makedirs(path)
+os.makedirs(HISTORY_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-ensure_dir(DATA_DIR)
-
-def log(msg):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now}] {msg}")
-
-# ------------------- 获取股票列表 -------------------
+# ===============================
+# 工具函数
+# ===============================
 def get_stock_list():
-    log("开始获取股票列表（沪深 + 北交所）")
+    """获取沪深 + 北交所股票列表"""
+    print(f"[{datetime.now()}] 开始获取股票列表（沪深 + 北交所）")
+    all_list = pd.DataFrame(columns=['代码','名称','市场'])
     try:
         sh_list = ak.stock_info_a_code_name()
-        sz_list = ak.stock_info_sz_name_code()
-        # 北交所暂时获取失败时忽略
-        try:
-            bj_list = ak.stock_info_bj_stock_name()  
-        except Exception as e:
-            log(f"[错误] 获取北交所失败: {e}")
-            bj_list = pd.DataFrame(columns=["代码","名称"])
+        sh_list['市场'] = '沪深'
+        all_list = pd.concat([all_list, sh_list], ignore_index=True)
+        print(f"[{datetime.now()}] 沪深A股数量: {len(sh_list)}")
     except Exception as e:
-        log(f"[错误] 获取沪深股票列表失败: {e}")
-        return pd.DataFrame(columns=["代码","名称"])
-    
-    df = pd.concat([sh_list, sz_list, bj_list], ignore_index=True)
-    df.drop_duplicates(subset=["代码"], inplace=True)
-    df.to_csv(STOCK_LIST_FILE, index=False)
-    log(f"股票列表获取完成，总数: {len(df)}")
+        print(f"[{datetime.now()}] [错误] 获取沪深A股失败: {e}")
+
+    try:
+        # 北交所可以用板块或其他接口替代
+        bj_df = ak.stock_board_industry_name_em()
+        bj_list = bj_df[['板块代码', '板块名称']].rename(columns={'板块代码':'代码', '板块名称':'名称'})
+        bj_list['市场'] = '北交所'
+        all_list = pd.concat([all_list, bj_list], ignore_index=True)
+        print(f"[{datetime.now()}] 北交所股票数量: {len(bj_list)}")
+    except Exception as e:
+        print(f"[{datetime.now()}] [错误] 获取北交所失败: {e}")
+
+    all_list.drop_duplicates(subset=['代码'], inplace=True)
+    return all_list
+
+def download_history(stock_code):
+    """下载股票历史行情，前复权"""
+    try:
+        df = ak.stock_zh_a_hist(symbol=stock_code, period="daily", adjust="qfq")
+        if df.empty:
+            raise ValueError("数据为空")
+        df.sort_values("日期", inplace=True)
+        df.to_csv(f"{HISTORY_DIR}/{stock_code}.csv", index=False)
+        return stock_code, True
+    except Exception as e:
+        print(f"[{datetime.now()}] [错误] 获取 {stock_code} 历史数据失败: {e}")
+        return stock_code, False
+
+def calculate_indicators(df):
+    """计算 RSI1, WR1, WR2"""
+    N1, N2, N3 = 9, 10, 20
+    df['LC'] = df['收盘价'].shift(1)
+    df['RSI1'] = df['收盘价'].combine(df['LC'], lambda x,y: max(x-y,0))\
+                 .rolling(N1).mean() / df['收盘价'].combine(df['LC'], lambda x,y: abs(x-y))\
+                 .rolling(N1).mean() * 100
+    df['WR1'] = (df['最高价'].rolling(N2).max() - df['收盘价']) / \
+                (df['最高价'].rolling(N2).max() - df['最低价'].rolling(N2).min()) * 100
+    df['WR2'] = (df['最高价'].rolling(N3).max() - df['收盘价']) / \
+                (df['最高价'].rolling(N3).max() - df['最低价'].rolling(N3).min()) * 100
     return df
 
-# ------------------- 下载历史行情 -------------------
-def download_history(stock, retry=1):
-    code = stock['代码']
-    file_path = os.path.join(DATA_DIR, f"{code}.csv")
-    for attempt in range(retry+1):
-        try:
-            df = ak.stock_zh_a_daily(symbol=code, adjust="qfq")  # 前复权
-            if df.empty:
-                raise ValueError("数据为空")
-            df = df[['日期','开盘','收盘','最高','最低','成交量','成交额']]
-            df.to_csv(file_path, index=False)
-            return code
-        except Exception as e:
-            log(f"[错误] 获取 {code} 历史数据失败: {e} (尝试 {attempt+1}/{retry+1})")
-            time.sleep(1)
-    return code
+def select_stock(stock_code):
+    """单只股票选股"""
+    file_path = f"{HISTORY_DIR}/{stock_code}.csv"
+    if not os.path.exists(file_path):
+        return None
+    df = pd.read_csv(file_path)
+    if df.empty:
+        return None
+    df = calculate_indicators(df)
+    latest = df.iloc[-1]
+    # 市值及上市天数判断
+    try:
+        finance = ak.stock_financial_analysis_indicator(symbol=stock_code)
+        if finance.empty:
+            return None
+        mkt_cap = finance.iloc[0].get("总市值",0)/1e8
+        list_days = (datetime.now() - pd.to_datetime(finance.iloc[0].get("上市日期",datetime.now()))).days
+        if mkt_cap < MIN_MKT_CAP or list_days < MIN_LIST_DAYS:
+            return None
+    except:
+        pass
+    if latest['RSI1'] > 70 and latest['WR1'] < 20 and latest['WR2'] < 20:
+        return stock_code
+    return None
 
-def update_history(stock_list):
-    log("开始下载历史行情...")
+def plot_count_history(df_history):
+    """绘制选股数量折线图"""
+    plt.figure(figsize=(10,6))
+    plt.plot(pd.to_datetime(df_history['日期']), df_history['数量'], marker='o')
+    plt.title("选股数量历史趋势")
+    plt.xlabel("日期")
+    plt.ylabel("选股数量")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(f"{OUTPUT_DIR}/selected_stock_count.png")
+    plt.close()
+
+# ===============================
+# 主函数
+# ===============================
+def main():
+    print(f"[{datetime.now()}] 开始运行自动选股程序")
+    stock_list = get_stock_list()
+    print(f"[{datetime.now()}] 股票列表获取完成，总数: {len(stock_list)}")
+
+    # 多线程下载历史数据
+    print(f"[{datetime.now()}] 开始下载历史行情...")
     failed_list = []
     with ThreadPoolExecutor(max_workers=THREADS) as executor:
-        for code in tqdm(executor.map(download_history, stock_list.to_dict('records')),
-                         total=len(stock_list)):
-            file_path = os.path.join(DATA_DIR, f"{code}.csv")
-            if not os.path.exists(file_path):
+        future_to_stock = {executor.submit(download_history, code): code for code in stock_list['代码']}
+        for future in as_completed(future_to_stock):
+            code, success = future.result()
+            if not success:
                 failed_list.append(code)
-    # 重试失败股票
-    if failed_list:
-        log(f"重试 {len(failed_list)} 个下载失败的股票...")
-        for stock in stock_list[stock_list['代码'].isin(failed_list)].to_dict('records'):
-            download_history(stock, retry=2)
+    # 失败重试一次
+    for code in failed_list:
+        download_history(code)
 
-# ------------------- 选股逻辑 -------------------
-def select_stocks(stock_list):
-    log("开始选股...")
-    selected = []
-    for stock in tqdm(stock_list.to_dict('records')):
-        code = stock['代码']
-        file_path = os.path.join(DATA_DIR, f"{code}.csv")
-        if not os.path.exists(file_path):
-            continue
-        df = pd.read_csv(file_path)
-        if df.empty:
-            continue
-        # 剔除未交易的和ST品种
-        if 'ST' in stock['名称']:
-            continue
-        if df['收盘'].iloc[-1] == 0:
-            continue
-        # 计算指标
-        N1, N2, N3 = 9, 10, 20
-        LC = df['收盘'].shift(1)
-        delta = df['收盘'] - LC
-        rsi1 = delta.clip(lower=0).rolling(N1).mean() / delta.abs().rolling(N1).mean() * 100
-        hhv_N2 = df['最高'].rolling(N2).max()
-        llv_N2 = df['最低'].rolling(N2).min()
-        wr1 = 100 * (hhv_N2 - df['收盘']) / (hhv_N2 - llv_N2)
-        hhv_N3 = df['最高'].rolling(N3).max()
-        llv_N3 = df['最低'].rolling(N3).min()
-        wr2 = 100 * (hhv_N3 - df['收盘']) / (hhv_N3 - llv_N3)
-        # 市值及天数判断（简单用行数代替上市天数）
-        if len(df) < MIN_LISTED_DAYS:
-            continue
-        # 选股条件
-        if rsi1.iloc[-1] > 70 and wr1.iloc[-1] < 20 and wr2.iloc[-1] < 20:
-            selected.append(stock)
-    df_selected = pd.DataFrame(selected)
-    df_selected.to_csv(SELECTED_FILE, index=False)
-    log(f"选股完成，总数: {len(df_selected)}")
-    return df_selected
+    # 选股
+    selected_stocks = []
+    with ThreadPoolExecutor(max_workers=THREADS) as executor:
+        future_to_stock = {executor.submit(select_stock, code): code for code in stock_list['代码']}
+        for future in as_completed(future_to_stock):
+            res = future.result()
+            if res:
+                selected_stocks.append(res)
+    print(f"[{datetime.now()}] 选股完成，总数: {len(selected_stocks)}")
 
-# ------------------- 绘制折线图 -------------------
-def plot_count_history(df_selected):
-    log("绘制选股数量折线图...")
+    # 保存选股结果
+    df_selected = stock_list[stock_list['代码'].isin(selected_stocks)]
+    df_selected.to_csv(f"{OUTPUT_DIR}/selected_stocks.csv", index=False)
+
+    # 处理历史选股数量
+    history_file = f"{OUTPUT_DIR}/stock_count_history.csv"
     today = datetime.now().strftime("%Y-%m-%d")
-    if os.path.exists(COUNT_HISTORY_FILE):
-        df_history = pd.read_csv(COUNT_HISTORY_FILE)
+    if os.path.exists(history_file):
+        df_history = pd.read_csv(history_file)
     else:
         df_history = pd.DataFrame(columns=["日期","数量"])
-    df_history = df_history.append({"日期": today, "数量": len(df_selected)}, ignore_index=True)
-    df_history.to_csv(COUNT_HISTORY_FILE, index=False)
-    plt.figure(figsize=(10,5))
-    plt.plot(pd.to_datetime(df_history['日期']), df_history['数量'], marker='o')
-    plt.title("每日选股数量")
-    plt.xlabel("日期")
-    plt.ylabel("数量")
-    plt.grid(True)
-    plt.savefig("selected_stock_count.png")
-    plt.close()
-    log("折线图保存完成: selected_stock_count.png")
+        # 首次补齐最近TRADE_DAYS_HISTORY个交易日数量
+        for i in range(TRADE_DAYS_HISTORY,0,-1):
+            day = datetime.now() - timedelta(days=i)
+            if day.weekday() >=5:
+                continue  # 跳过周末
+            df_history = pd.concat([df_history, pd.DataFrame([{"日期":day.strftime("%Y-%m-%d"), "数量":0}])], ignore_index=True)
 
-# ------------------- 主函数 -------------------
-def main():
-    log("开始运行自动选股程序")
-    if os.path.exists(STOCK_LIST_FILE):
-        stock_list = pd.read_csv(STOCK_LIST_FILE)
-    else:
-        stock_list = get_stock_list()
-    update_history(stock_list)
-    df_selected = select_stocks(stock_list)
-    plot_count_history(df_selected)
-    log("程序运行结束")
+    df_history = pd.concat([df_history, pd.DataFrame([{"日期": today, "数量": len(df_selected)}])], ignore_index=True)
+    df_history.to_csv(history_file, index=False)
+
+    # 绘图
+    plot_count_history(df_history)
+    print(f"[{datetime.now()}] 选股历史趋势折线图已生成")
 
 if __name__ == "__main__":
     main()
