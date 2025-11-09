@@ -2,7 +2,7 @@ name: Auto Select Stock
 
 on:
   schedule:
-    - cron: "0 16 * * 1-5"  # 每个交易日下午 16:00 运行
+    - cron: "0 16 * * 1-5"
   workflow_dispatch:
 
 jobs:
