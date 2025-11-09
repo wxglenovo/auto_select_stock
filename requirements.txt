@@ -1,4 +1,6 @@
-akshare
-pandas
-matplotlib
-tqdm
+akshare>=1.0.0
+pandas>=2.0.0
+numpy>=1.26.0
+matplotlib>=3.10.0
+tqdm>=4.66.0
+requests>=2.32.0
