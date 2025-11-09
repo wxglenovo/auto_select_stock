@@ -1,4 +1,4 @@
 pandas
-tqdm
 matplotlib
-requests
+tqdm
+pytdx
