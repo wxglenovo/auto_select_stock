@@ -2,7 +2,7 @@ name: Auto Select Stock
 
 on:
   schedule:
-    - cron: "0 23 * * *"   # 每天 23 点运行
+    - cron: "0 18 * * *"  # 每天 18:00 自动运行（收盘后）
   workflow_dispatch:
 
 jobs:
@@ -10,27 +10,37 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: 3.10
 
-      - name: Install dependencies
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas matplotlib tqdm pytdx
+          pip install -r requirements.txt
 
-      - name: Run Auto Select Stock
+      - name: Download & Prepare TDX Data
+        run: |
+          mkdir -p tdx_data
+          TDX_ZIP_URL="https://data.tdx.com.cn/vipdoc/hsjday.zip"
+          TDX_ZIP_PATH="tdx_data/hsjday.zip"
+          echo "[INFO] 下载 TDX 数据包: $TDX_ZIP_URL"
+          curl -L -o "$TDX_ZIP_PATH" "$TDX_ZIP_URL"
+          echo "[INFO] 解压 $TDX_ZIP_PATH 到 tdx_data"
+          unzip -o "$TDX_ZIP_PATH" -d tdx_data || echo "[WARN] 解压失败，检查文件是否完整"
+
+      - name: Run Stock Selection Script
         run: |
           python auto_select_stock.py
 
-      - name: Upload selected stocks result
+      - name: Upload Result
         uses: actions/upload-artifact@v4
         with:
           name: selected_stocks_results
           path: |
-            output/selected_stocks.csv
-            output/selected_stock_count.png
+            selected_stocks.csv
+            selected_stock_count.png
