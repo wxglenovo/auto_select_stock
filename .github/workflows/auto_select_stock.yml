@@ -1,16 +1,17 @@
+# .github/workflows/auto_select_stock.yml
 name: Auto Select Stock
 
 on:
   schedule:
-    - cron: "0 16 * * 1-5"
-  workflow_dispatch:
+    - cron: "0 16 * * 1-5"   # 每周一到周五 16:00 UTC
+  workflow_dispatch:          # 手动触发
 
 jobs:
   run_auto_select:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -21,13 +22,15 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas matplotlib requests
+          pip install -r requirements.txt
 
       - name: Run Auto Select Stock
         run: python auto_select_stock.py
 
-      - name: Upload Result
+      - name: Upload Results
         uses: actions/upload-artifact@v4
         with:
-          name: select_result
-          path: daily_selected_count.png
+          name: selected_stocks_results
+          path: |
+            selected_stocks.csv
+            selected_stock_count.png
