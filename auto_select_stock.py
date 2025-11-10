@@ -10,9 +10,9 @@ from datetime import datetime, timedelta
 # 配置
 TDX_DATA_DIR = "tdx_data"
 OUTPUT_CSV = "selected_stocks.csv"
+OUTPUT_DAILY_COUNT_CSV = "daily_selected_count.csv"
 OUTPUT_PNG = "selected_stock_count.png"
-MIN_MARKET_CAP = 5  # 亿
-MIN_LIST_DAYS = 30
+MIN_LIST_DAYS = 30  # 上市天数
 
 # RSI + WR 参数
 N1 = 9
@@ -75,21 +75,32 @@ def calc_rsi_wr(df):
     df["WR2"] = wr2
     return df
 
-def filter_stocks(stocks):
-    selected = {}
-    for code, file_path in tqdm(stocks.items(), desc="筛选股票"):
+def daily_selected_count(stocks):
+    """统计每日选股数量"""
+    all_dates = set()
+    dfs = {}
+    for code, file_path in tqdm(stocks.items(), desc="读取股票数据"):
         df = read_day_file(file_path)
         if df is None or df.empty:
             continue
-        # 剔除上市天数不足
         if (df["日期"].max() - df["日期"].min()).days < MIN_LIST_DAYS:
             continue
         df = calc_rsi_wr(df)
-        # 选股条件：RSI>70 & WR1<20 & WR2<20
-        last_row = df.iloc[-1]
-        if last_row["RSI"] > 70 and last_row["WR1"] < 20 and last_row["WR2"] < 20:
-            selected[code] = last_row["收盘"]
-    return selected
+        dfs[code] = df
+        all_dates.update(df["日期"])
+    all_dates = sorted(all_dates)
+    date_counts = {}
+    for date in tqdm(all_dates, desc="统计每日选股数量"):
+        count = 0
+        for code, df in dfs.items():
+            row = df[df["日期"] == date]
+            if not row.empty:
+                r = row.iloc[0]
+                if r["RSI"] > 70 and r["WR1"] < 20 and r["WR2"] < 20:
+                    count += 1
+        if count > 0:
+            date_counts[date] = count
+    return date_counts
 
 def main():
     print("[INFO] 开始运行自动选股程序")
@@ -99,25 +110,43 @@ def main():
         print("[错误] 没有找到任何 .day 文件，直接退出")
         return
 
-    selected = filter_stocks(stocks)
-    print(f"[INFO] 选中股票数量: {len(selected)}")
+    date_counts = daily_selected_count(stocks)
+    if not date_counts:
+        print("[INFO] 没有任何日期选出股票")
+        return
 
-    if selected:
-        # 保存 CSV
-        df_out = pd.DataFrame(list(selected.items()), columns=["代码","收盘"])
-        df_out.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
-        print(f"[INFO] 生成 CSV → {OUTPUT_CSV}")
+    # 保存每日选股数量 CSV
+    df_count = pd.DataFrame(list(date_counts.items()), columns=["日期","选中数量"])
+    df_count.to_csv(OUTPUT_DAILY_COUNT_CSV, index=False, encoding="utf-8-sig")
+    print(f"[INFO] 生成每日选股数量 CSV → {OUTPUT_DAILY_COUNT_CSV}")
 
-        # 生成折线图
-        plt.figure(figsize=(10,6))
-        df_out["收盘"].plot(kind="line", title="选股数量")
-        plt.ylabel("收盘价")
-        plt.xlabel("股票代码")
-        plt.tight_layout()
-        plt.savefig(OUTPUT_PNG)
-        print(f"[INFO] 生成折线图 → {OUTPUT_PNG}")
-    else:
-        print("[INFO] 没有股票满足条件")
+    # 保存最新一天的选中股票 CSV
+    latest_date = max(date_counts.keys())
+    selected_latest = {}
+    for code, file_path in stocks.items():
+        df = read_day_file(file_path)
+        if df is None or df.empty:
+            continue
+        if (df["日期"].max() - df["日期"].min()).days < MIN_LIST_DAYS:
+            continue
+        df = calc_rsi_wr(df)
+        row = df[df["日期"] == latest_date]
+        if not row.empty:
+            r = row.iloc[0]
+            if r["RSI"] > 70 and r["WR1"] < 20 and r["WR2"] < 20:
+                selected_latest[code] = r["收盘"]
+    df_latest = pd.DataFrame(list(selected_latest.items()), columns=["代码","收盘"])
+    df_latest.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+    print(f"[INFO] 生成最新选股 CSV → {OUTPUT_CSV}")
+
+    # 绘制折线图（休市日自动跳过）
+    plt.figure(figsize=(12,6))
+    df_count.set_index("日期")["选中数量"].plot(kind="line", marker="o", title="每日选股数量")
+    plt.ylabel("选中数量")
+    plt.xlabel("日期")
+    plt.tight_layout()
+    plt.savefig(OUTPUT_PNG)
+    print(f"[INFO] 生成折线图 → {OUTPUT_PNG}")
 
 if __name__ == "__main__":
     main()
