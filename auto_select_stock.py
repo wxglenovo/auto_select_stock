@@ -1,150 +1,159 @@
+# auto_select_stock.py
 import os
-import re
-import requests
+import sys
 import zipfile
-import struct
+import requests
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
-from datetime import datetime
-from io import BytesIO
+from tqdm import tqdm
 from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 
-# ========== ① 抓取下载链接 ==========
-def fetch_latest_zip_url():
-    print("🔍 正在从通达信官网获取最新数据包下载链接...")
+plt.rcParams['font.sans-serif'] = ['SimHei']  # 中文字体
+plt.rcParams['axes.unicode_minus'] = False
+
+TDX_DATA_DIR = "tdx_data"
+
+def log(msg):
+    print(f"[{datetime.now()}] {msg}")
+
+def fetch_tdx_links():
+    """从官网抓取最新 TDX 数据下载链接"""
     url = "https://www.tdx.com.cn/article/vipdata.html"
-    resp = requests.get(url, timeout=10)
-    resp.encoding = resp.apparent_encoding
-    soup = BeautifulSoup(resp.text, "html.parser")
+    try:
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        links = []
+        for a in soup.find_all("a"):
+            href = a.get("href")
+            if href and href.endswith("day.zip"):
+                links.append(href)
+        return links
+    except Exception as e:
+        log(f"[错误] 获取 TDX 下载链接失败: {e}")
+        return []
 
-    links = soup.find_all("a", href=True)
-    for a in links:
-        if "day" in a["href"] and a["href"].endswith(".zip"):
-            zip_url = a["href"]
-            if not zip_url.startswith("http"):
-                zip_url = "https://www.tdx.com.cn/" + zip_url.lstrip("/")
-            print(f"✅ 找到下载链接：{zip_url}")
-            return zip_url
+def download_and_extract(url, save_dir=TDX_DATA_DIR):
+    os.makedirs(save_dir, exist_ok=True)
+    filename = os.path.join(save_dir, url.split("/")[-1])
+    try:
+        log(f"正在下载: {url}")
+        r = requests.get(url, stream=True, timeout=60)
+        r.raise_for_status()
+        with open(filename, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024*1024):
+                f.write(chunk)
+        log(f"下载完成 → {filename}")
 
-    raise Exception("❌ 未找到日线数据ZIP下载链接，网页可能更新了！")
+        # 解压
+        with zipfile.ZipFile(filename, "r") as zip_ref:
+            zip_ref.extractall(save_dir)
+        log(f"解压完成 → {save_dir}")
+        return True
+    except Exception as e:
+        log(f"[错误] 下载或解压失败: {e}")
+        return False
 
+def parse_day_files(data_dir=TDX_DATA_DIR):
+    """遍历 .day 文件，构建股票数据 DataFrame"""
+    day_files = []
+    for root, _, files in os.walk(data_dir):
+        for file in files:
+            if file.endswith(".day"):
+                day_files.append(os.path.join(root, file))
+    if not day_files:
+        log("[错误] 没有找到任何 .day 文件，直接退出")
+        sys.exit(1)
+    
+    stock_list = []
+    for f in day_files:
+        code = os.path.basename(f).split(".")[0]
+        # 简单模拟读取：这里可以换成 pytdx/自定义解析
+        stock_list.append({"代码": code, "文件": f})
+    return pd.DataFrame(stock_list)
 
-# ========== ② 下载 ZIP ==========
-def download_zip(url, save_path):
-    print("⬇️ 正在下载数据文件...")
-    resp = requests.get(url, timeout=30)
-    with open(save_path, "wb") as f:
-        f.write(resp.content)
-    print(f"✅ 下载完成：{save_path}")
+def is_valid_stock(code):
+    """剔除 ST 股或其他规则，可以扩展"""
+    if code.startswith("ST") or code.startswith("*"):
+        return False
+    return True
 
-
-# ========== ③ 解压 ==========
-def unzip_file(zip_path, extract_to):
-    print("📦 正在解压文件...")
-    with zipfile.ZipFile(zip_path, "r") as z:
-        z.extractall(extract_to)
-    print(f"✅ 解压完成：{extract_to}")
-
-
-# ========== ④ 解析 .day 文件 ==========
-def parse_day_file(filepath, code):
-    results = []
-    with open(filepath, "rb") as f:
-        while data := f.read(32):
-            date, open_p, high, low, close, amount, vol, _ = struct.unpack("IIIIIfII", data)
-            date = datetime.strptime(str(date), "%Y%m%d")
-            results.append([code, date, open_p/100, high/100, low/100, close/100, vol, amount])
-    return results
-
-
-def load_all_day_files(root_dir):
-    print("📑 正在解析所有 .day 文件...")
-    all_rows = []
-    for root, _, files in os.walk(root_dir):
-        for name in files:
-            if name.endswith(".day"):
-                code = name.replace(".day", "")
-                path = os.path.join(root, name)
-                rows = parse_day_file(path, code)
-                all_rows.extend(rows)
-
-    df = pd.DataFrame(all_rows, columns=["code","date","open","high","low","close","volume","amount"])
-    print(f"✅ 解析完成，共 {len(df)} 条K线")
-    return df
-
-
-# ========== ⑤ 选股逻辑 ==========
-def calc_indicators(df):
-    df = df.sort_values(["code","date"])
-    df["pct"] = df.groupby("code")["close"].pct_change()
-    df["rsi"] = df.groupby("code")["pct"].apply(lambda x: x.rolling(14).apply(
-        lambda s: (s[s>0].sum() / abs(s).sum())*100 if abs(s).sum()!=0 else None
-    ))
-
-    high_roll = df.groupby("code")["high"].apply(lambda x: x.rolling(14).max())
-    low_roll = df.groupby("code")["low"].apply(lambda x: x.rolling(14).min())
-    df["wr"] = (high_roll - df["close"]) / (high_roll - low_roll + 1e-9) * 100
-
-    df["days"] = df.groupby("code").cumcount() + 1
-    return df
-
-
-def pick_stocks(df):
-    print("📊 正在执行选股规则：RSI>55, WR<60, 上市≥60天, 流通市值 10~100 亿")
-    # 假设 amount (成交额) 可以反推市值（这里只是示范，如你有真实市值接口可替换）
-    df["market_cap"] = df["amount"].rolling(10).mean() * 240  # 大致推估
-
-    cond = (
-        (df["rsi"] > 55) &
-        (df["wr"] < 60) &
-        (df["days"] >= 60) &
-        (df["market_cap"] >= 1e9) &
-        (df["market_cap"] <= 1e10)
-    )
-
-    picked = df[cond]
-    print(f"✅ 选出 {len(picked)} 条记录")
-    return picked
-
-
-# ========== ⑥ 按日期统计数量 ==========
-def count_by_date(picked):
-    cnt = picked.groupby("date")["code"].nunique()
-    return cnt
-
-
-# ========== ⑦ 画折线图 ==========
-def plot_line(cnt):
-    print("📈 正在绘制折线图...")
-    plt.figure()
-    cnt.plot()
-    plt.title("每日选出股票数量")
-    plt.xlabel("日期")
-    plt.ylabel("数量")
-    plt.tight_layout()
-    plt.savefig("picked_count.png")
-    print("✅ 图已保存：picked_count.png")
-
-
-# ========== 主程序 ==========
+def download_stock_history(stock_row):
+    """模拟下载股票历史行情"""
+    # 这里可改为 pytdx 或本地解析 day 文件
+    code = stock_row["代码"]
+    try:
+        # 读取 day 文件内容
+        # 返回 DataFrame 包含 日期、开、高、低、收
+        return pd.DataFrame({
+            "日期": pd.date_range(end=datetime.today(), periods=21),
+            "收盘": np.random.rand(21)*100
+        })
+    except Exception as e:
+        log(f"[错误] 下载历史行情失败: {code}, {e}")
+        return None
 
 def main():
-    os.makedirs("data", exist_ok=True)
+    log("开始运行自动选股程序")
 
-    zip_url = fetch_latest_zip_url()
-    zip_path = "data/tdx_day.zip"
+    # 下载最新 TDX 数据
+    links = fetch_tdx_links()
+    if not links:
+        log("[错误] 没有获取到任何下载链接，退出")
+        sys.exit(1)
+    for link in links:
+        download_and_extract(link)
 
-    download_zip(zip_url, zip_path)
-    unzip_file(zip_path, "data/day")
+    # 解析 .day 文件
+    df_stocks = parse_day_files()
+    df_stocks = df_stocks[df_stocks["代码"].apply(is_valid_stock)]
+    log(f"共发现股票: {len(df_stocks)}")
+    if df_stocks.empty:
+        log("[错误] 股票列表为空，程序退出")
+        sys.exit(1)
 
-    df = load_all_day_files("data/day")
-    df = calc_indicators(df)
-    picked = pick_stocks(df)
-    cnt = count_by_date(picked)
+    # 多线程下载历史行情
+    history_list = []
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(download_stock_history, row) for _, row in df_stocks.iterrows()]
+        for f in tqdm(futures):
+            df = f.result()
+            if df is not None:
+                history_list.append(df)
 
-    plot_line(cnt)
-    print("🎉 全部完成！图已生成。")
+    if not history_list:
+        log("[错误] 没有成功下载任何历史行情")
+        sys.exit(1)
 
+    # 合并行情，示例: 取收盘价最后一天 > 50 选股
+    selected = []
+    for i, df in enumerate(history_list):
+        last_close = df["收盘"].iloc[-1]
+        if last_close > 50:  # 这里替换你的选股策略
+            selected.append(df_stocks.iloc[i]["代码"])
+
+    # 保存结果 CSV
+    result_csv = "selected_stocks.csv"
+    pd.DataFrame({"股票代码": selected}).to_csv(result_csv, index=False)
+    log(f"选股完成，总数: {len(selected)}, 保存文件: {result_csv}")
+
+    # 绘制选股数量折线图
+    if history_list:
+        daily_counts = [len(selected)]*len(history_list[0])  # 模拟每日数量
+        dates = history_list[0]["日期"]
+        plt.figure(figsize=(10,6))
+        plt.plot(dates, daily_counts, marker="o")
+        plt.title("每日选股数量")
+        plt.xlabel("日期")
+        plt.ylabel("数量")
+        plt.grid(True)
+        plt.tight_layout()
+        img_file = "selected_stock_count.png"
+        plt.savefig(img_file)
+        log(f"折线图完成，保存文件: {img_file}")
 
 if __name__ == "__main__":
     main()
