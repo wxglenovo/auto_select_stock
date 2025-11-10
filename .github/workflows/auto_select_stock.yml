@@ -21,25 +21,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install pandas matplotlib requests
 
-      - name: Download TDX Data (仅沪深)
-        run: |
-          mkdir -p tdx_data
-          echo "[INFO] 下载 TDX hsjday.zip"
-          wget -O tdx_data/hsjday.zip https://data.tdx.com.cn/vipdoc/hsjday.zip
-          
-          echo "[INFO] 解压 hsjday.zip"
-          unzip -o tdx_data/hsjday.zip -d tdx_data || true
-
-      - name: Run Auto Select
+      - name: Run Auto Select Stock
         run: python auto_select_stock.py
 
-      - name: Upload Results
+      - name: Upload Result
         uses: actions/upload-artifact@v4
         with:
-          name: selected_stocks_results
-          path: |
-            selected_stocks.csv
-            selected_stock_count.png
-            selected_stock_count_history.csv
+          name: select_result
+          path: daily_selected_count.png
