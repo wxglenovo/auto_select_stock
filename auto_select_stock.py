@@ -1,94 +1,122 @@
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
+import zipfile
+import requests
 
-# 通达信日线数据路径 (dzh 或 tdx)
-# TDX 格式: ./tdx_data/vipdoc/sh/lday, ./tdx_data/vipdoc/sz/lday
-DATA_PATH = "./tdx_data/vipdoc"
+DATA_DIR = "tdx_data"
 
-# 遍历全部股票
-def load_all_stocks():
-    stocks = []
-    for market in ["sh", "sz", "bj"]:
-        path = f"{DATA_PATH}/{market}/lday"
-        if not os.path.exists(path):
-            continue
-        for file in os.listdir(path):
-            if file.endswith(".day"):
-                code = file.replace(".day", "")
-                stocks.append((market, code))
-    return stocks
+# 下载函数
+def download_tdx_zip(url, filename):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    zip_path = os.path.join(DATA_DIR, filename)
+    if os.path.exists(zip_path):
+        print(f"{filename} 已存在，跳过下载")
+        return zip_path
 
-# 读取通达信 day 格式
-def read_tdx_day(file_path):
-    if not os.path.isfile(file_path):
-        return None
-    data = pd.fromfile(file_path, dtype='<i4')
-    if data.size % 8 != 0:
+    print(f"正在下载: {url}")
+    r = requests.get(url, timeout=20)
+    if r.status_code != 200:
+        print(f"下载失败: {url}")
         return None
 
-    data = data.reshape((-1, 8))
-    df = pd.DataFrame()
-    df['date'] = data[:, 0]
-    df['open'] = data[:, 1] / 100.0
-    df['high'] = data[:, 2] / 100.0
-    df['low'] = data[:, 3] / 100.0
-    df['close'] = data[:, 4] / 100.0
-    df['amount'] = data[:, 5]
-    df['vol'] = data[:, 6]
-    return df
+    with open(zip_path, "wb") as f:
+        f.write(r.content)
 
-# 公式计算：RSI、WR
-def check_condition(df, idx):
-    if idx < 20:
-        return False
+    print(f"下载完成 → {zip_path}")
+    return zip_path
 
-    close = df['close']
-    high = df['high']
-    low = df['low']
+# 解压 zip
+def unzip_file(zip_path):
+    try:
+        with zipfile.ZipFile(zip_path, "r") as z:
+            z.extractall(DATA_DIR)
+            print(f"完成解压: {zip_path}")
+    except:
+        print(f"解压失败: {zip_path}")
 
-    # RSI1
-    lc = close.shift(1)
-    rsi1 = (close - lc).clip(lower=0).rolling(9).mean() / (close - lc).abs().rolling(9).mean() * 100
+# 读取 .day 文件
+def read_day_file(path):
+    try:
+        data = pd.fromfile(path, dtype="<i4")
+        if data.size % 8 != 0:
+            return None
+        data = data.reshape((-1, 8))
+        df = pd.DataFrame()
+        df["date"] = data[:, 0]
+        df["open"] = data[:, 1] / 100
+        df["high"] = data[:, 2] / 100
+        df["low"] = data[:, 3] / 100
+        df["close"] = data[:, 4] / 100
+        return df
+    except:
+        return None
 
-    # WR1、WR2
-    wr1 = (high.rolling(10).max() - close) / (high.rolling(10).max() - low.rolling(10).min() + 0.01) * 100
-    wr2 = (high.rolling(20).max() - close) / (high.rolling(20).max() - low.rolling(20).min() + 0.01) * 100
-
-    return (rsi1.iloc[idx] > 70) and (wr1.iloc[idx] < 20) and (wr2.iloc[idx] < 20)
-
-# 汇总每天数量
 def main():
-    stocks = load_all_stocks()
-    print(f"共发现股票: {len(stocks)}")
+    # ✅ 下载三个市场数据
+    files = [
+        ("https://data.tdx.com.cn/download/shlday.zip", "shlday.zip"),
+        ("https://data.tdx.com.cn/download/szlday.zip", "szlday.zip"),
+        ("https://data.tdx.com.cn/download/bjlday.zip", "bjlday.zip"),
+    ]
+
+    for url, name in files:
+        zip_path = download_tdx_zip(url, name)
+        if zip_path:
+            unzip_file(zip_path)
+
+    # ✅ 搜索所有 day 文件
+    day_files = []
+    for root, dirs, files in os.walk(DATA_DIR):
+        for f in files:
+            if f.endswith(".day"):
+                day_files.append(os.path.join(root, f))
+
+    print(f"共发现股票: {len(day_files)}")
+
+    if len(day_files) == 0:
+        print("没有找到任何 .day 文件，直接退出")
+        return
 
     daily_count = {}
 
-    for market, code in stocks:
-        file_path = f"{DATA_PATH}/{market}/lday/{code}.day"
-        df = read_tdx_day(file_path)
-        if df is None:
+    for f in day_files:
+        df = read_day_file(f)
+        if df is None or len(df) < 25:
             continue
 
-        for i in range(len(df)):
-            date = df['date'].iloc[i]
-            if check_condition(df, i):
-                daily_count[date] = daily_count.get(date, 0) + 1
+        close = df["close"]
+        high = df["high"]
+        low = df["low"]
 
-    # 转换为可画图格式
-    series = pd.Series(daily_count).sort_index()
+        rsi1 = (
+            (close - close.shift(1)).clip(lower=0).rolling(9).mean()
+            / (close - close.shift(1)).abs().rolling(9).mean() * 100
+        )
 
-    print(series.tail())
+        wr1 = (high.rolling(10).max() - close) / (high.rolling(10).max() - low.rolling(10).min() + 0.01) * 100
+        wr2 = (high.rolling(20).max() - close) / (high.rolling(20).max() - low.rolling(20).min() + 0.01) * 100
 
-    # ✅ 折线图（无休市日）
+        df["cond"] = (rsi1 > 70) & (wr1 < 20) & (wr2 < 20)
+
+        for idx, row in df[df["cond"]].iterrows():
+            daily_count[row["date"]] = daily_count.get(row["date"], 0) + 1
+
+    # ✅ 没数据也不卡
+    if len(daily_count) == 0:
+        print("没有任何入选股票，直接退出")
+        return
+
+    s = pd.Series(daily_count).sort_index()
+    print(s.tail())
+
     plt.figure()
-    series.plot()
-    plt.title("每日符合条件股票数量")
+    s.plot()
+    plt.title("每日入选数量")
     plt.xlabel("交易日")
-    plt.ylabel("入选数量")
-    plt.tight_layout()
+    plt.ylabel("数量")
     plt.savefig("daily_selected_count.png")
-    plt.show()
+    print("✅ 图已生成: daily_selected_count.png")
 
 if __name__ == "__main__":
     main()
