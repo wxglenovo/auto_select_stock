@@ -2,8 +2,7 @@ name: Auto Select Stock
 
 on:
   schedule:
-    # 每个交易日 16:00 运行
-    - cron: "0 16 * * 1-5"
+    - cron: "0 16 * * 1-5"  # 每个交易日 16:00 执行
   workflow_dispatch:
 
 jobs:
@@ -22,15 +21,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install pandas matplotlib tqdm
 
       - name: Download TDX historical data
         run: |
           mkdir -p tdx_data
-          TDX_URL="https://data.tdx.com.cn/vipdoc/hsjday.zip"
-          wget -O tdx_data/hsjday.zip $TDX_URL
-          unzip -o tdx_data/hsjday.zip -d tdx_data || true
-          echo "TDX 数据下载并解压完成"
+          wget -O tdx_data/hsjday.zip https://data.tdx.com.cn/vipdoc/hsjday.zip
+          unzip -o tdx_data/hsjday.zip -d tdx_data
 
       - name: Run Auto Select Stock
         run: python auto_select_stock.py
