@@ -3,116 +3,121 @@ import os
 import struct
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
+from tqdm import tqdm
+from datetime import datetime, timedelta
 
-plt.rcParams['font.sans-serif'] = ['SimHei']  # 支持中文
-plt.rcParams['axes.unicode_minus'] = False
-
+# 配置
 TDX_DATA_DIR = "tdx_data"
+OUTPUT_CSV = "selected_stocks.csv"
+OUTPUT_PNG = "selected_stock_count.png"
+MIN_MARKET_CAP = 5  # 亿
+MIN_LIST_DAYS = 30
+
+# RSI + WR 参数
+N1 = 9
+N2 = 10
+N3 = 20
 
 def read_day_file(file_path):
     """解析通达信 .day 文件"""
-    if not os.path.exists(file_path):
-        return None
-    record_struct = struct.Struct('<IIIIIfII')  # 日期, open, high, low, close, amount, vol, reserved
-    with open(file_path, 'rb') as f:
-        content = f.read()
+    try:
+        with open(file_path, "rb") as f:
+            buf = f.read()
+        record_size = 32
+        num_records = len(buf) // record_size
         data = []
-        for i in range(0, len(content), record_struct.size):
-            record = record_struct.unpack(content[i:i+record_struct.size])
-            date = datetime.strptime(str(record[0]), '%Y%m%d')
-            open_price = record[1] / 100
-            high = record[2] / 100
-            low = record[3] / 100
-            close = record[4] / 100
-            amount = record[5] / 10
-            vol = record[6]
-            data.append([date, open_price, high, low, close, amount, vol])
-    df = pd.DataFrame(data, columns=['日期','开盘','最高','最低','收盘','成交额','成交量'])
-    df.sort_values('日期', inplace=True)
+        for i in range(num_records):
+            offset = i * record_size
+            r = struct.unpack("<IIIIIfII", buf[offset:offset+record_size])
+            date = r[0]
+            y = date // 10000
+            m = (date % 10000) // 100
+            d = date % 100
+            close = r[3] / 100
+            high = r[1] / 100
+            low = r[2] / 100
+            openp = r[4] / 100
+            vol = r[5]
+            data.append([datetime(y, m, d), openp, high, low, close, vol])
+        df = pd.DataFrame(data, columns=["日期","开盘","最高","最低","收盘","成交量"])
+        df.sort_values("日期", inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        return df
+    except Exception as e:
+        print(f"[错误] 解析 {file_path} 失败: {e}")
+        return None
+
+def get_all_stocks(data_dir=TDX_DATA_DIR):
+    """扫描 tdx_data 目录下所有 .day 文件"""
+    stocks = {}
+    for root, _, files in os.walk(data_dir):
+        for f in files:
+            if f.endswith(".day"):
+                code = os.path.splitext(f)[0]
+                stocks[code] = os.path.join(root, f)
+    return stocks
+
+def calc_rsi_wr(df):
+    LC = df["收盘"].shift(1)
+    delta = df["收盘"] - LC
+    delta_up = delta.clip(lower=0)
+    delta_abs = delta.abs()
+    rsi = delta_up.rolling(N1).mean() / delta_abs.rolling(N1).mean() * 100
+    hhv_high_N2 = df["最高"].rolling(N2).max()
+    llv_low_N2 = df["最低"].rolling(N2).min()
+    hhv_high_N3 = df["最高"].rolling(N3).max()
+    llv_low_N3 = df["最低"].rolling(N3).min()
+    wr1 = 100*(hhv_high_N2 - df["收盘"])/(hhv_high_N2 - llv_low_N2)
+    wr2 = 100*(hhv_high_N3 - df["收盘"])/(hhv_high_N3 - llv_low_N3)
+    df["RSI"] = rsi
+    df["WR1"] = wr1
+    df["WR2"] = wr2
     return df
 
-def load_all_stocks():
-    """遍历 tdx_data 目录下所有 .day 文件"""
-    stocks = {}
-    for root, dirs, files in os.walk(TDX_DATA_DIR):
-        for f in files:
-            if f.endswith('.day'):
-                code = os.path.splitext(f)[0]
-                path = os.path.join(root, f)
-                df = read_day_file(path)
-                if df is not None:
-                    stocks[code] = df
-    return stocks
-
-def filter_st(stocks):
-    """剔除 ST 股等，这里示例直接返回"""
-    # TODO: 可扩展读取股票名单或通过 FINANCE 字段过滤
-    return stocks
-
-def select_stock(stocks):
-    """简单选股策略示例"""
-    result = {}
-    for code, df in stocks.items():
-        if df.empty or len(df) < 21:
+def filter_stocks(stocks):
+    selected = {}
+    for code, file_path in tqdm(stocks.items(), desc="筛选股票"):
+        df = read_day_file(file_path)
+        if df is None or df.empty:
             continue
-        last_close = df['收盘'].iloc[-1]
-        if last_close > 10:  # 简单条件
-            result[code] = last_close
-    return result
-
-def generate_report(selected_stocks, stocks):
-    """生成 CSV 和折线图"""
-    if not selected_stocks:
-        print("[WARN] 没有选中股票")
-        return
-    # CSV
-    df_csv = pd.DataFrame([{'股票代码': k, '收盘价': v} for k, v in selected_stocks.items()])
-    df_csv.to_csv("selected_stocks.csv", index=False, encoding='utf-8-sig')
-    print(f"[INFO] 生成 CSV → selected_stocks.csv")
-
-    # 折线图
-    daily_counts = []
-    dates = []
-    for i in range(21):
-        date_list = []
-        count = 0
-        for code, df in stocks.items():
-            if len(df) > i:
-                if df['收盘'].iloc[-(i+1)] > 10:
-                    count += 1
-        daily_counts.append(count)
-        # 取交易日
-        sample_df = next(iter(stocks.values()))
-        if len(sample_df) > i:
-            dates.append(sample_df['日期'].iloc[-(i+1)])
-    df_plot = pd.DataFrame({'日期': dates[::-1], '数量': daily_counts[::-1]})
-    df_plot.set_index('日期', inplace=True)
-    df_plot.plot(marker='o')
-    plt.title("选股数量折线图")
-    plt.xlabel("交易日")
-    plt.ylabel("数量")
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig("selected_stock_count.png")
-    print(f"[INFO] 生成折线图 → selected_stock_count.png")
+        # 剔除上市天数不足
+        if (df["日期"].max() - df["日期"].min()).days < MIN_LIST_DAYS:
+            continue
+        df = calc_rsi_wr(df)
+        # 选股条件：RSI>70 & WR1<20 & WR2<20
+        last_row = df.iloc[-1]
+        if last_row["RSI"] > 70 and last_row["WR1"] < 20 and last_row["WR2"] < 20:
+            selected[code] = last_row["收盘"]
+    return selected
 
 def main():
     print("[INFO] 开始运行自动选股程序")
-    print("[INFO] 加载股票数据...")
-    stocks = load_all_stocks()
-    if not stocks:
-        print("[ERROR] 没有找到任何 .day 文件，直接退出")
-        return
+    stocks = get_all_stocks()
     print(f"[INFO] 共发现股票: {len(stocks)}")
+    if not stocks:
+        print("[错误] 没有找到任何 .day 文件，直接退出")
+        return
 
-    stocks = filter_st(stocks)
-    selected = select_stock(stocks)
+    selected = filter_stocks(stocks)
     print(f"[INFO] 选中股票数量: {len(selected)}")
 
-    generate_report(selected, stocks)
-    print("[INFO] 自动选股完成")
+    if selected:
+        # 保存 CSV
+        df_out = pd.DataFrame(list(selected.items()), columns=["代码","收盘"])
+        df_out.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+        print(f"[INFO] 生成 CSV → {OUTPUT_CSV}")
+
+        # 生成折线图
+        plt.figure(figsize=(10,6))
+        df_out["收盘"].plot(kind="line", title="选股数量")
+        plt.ylabel("收盘价")
+        plt.xlabel("股票代码")
+        plt.tight_layout()
+        plt.savefig(OUTPUT_PNG)
+        print(f"[INFO] 生成折线图 → {OUTPUT_PNG}")
+    else:
+        print("[INFO] 没有股票满足条件")
 
 if __name__ == "__main__":
     main()
