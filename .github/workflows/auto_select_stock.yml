@@ -2,12 +2,13 @@ name: Auto Select Stock
 
 on:
   schedule:
-    - cron: "0 16 * * 1-5"
+    - cron: "0 16 * * 1-5"  # 每个交易日 16:00
   workflow_dispatch:
 
 jobs:
   run_auto_select:
     runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 小时
 
     steps:
       - name: Checkout code
@@ -23,39 +24,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Fetch TDX latest data URL
-        id: fetch_url
+      - name: Download latest TDX historical data
         run: |
-          python - <<'EOF'
-          import requests
-          from bs4 import BeautifulSoup
-          import os
-
-          os.makedirs("tdx_data", exist_ok=True)
-          page = "https://www.tdx.com.cn/article/vipdata.html"
-          resp = requests.get(page)
-          resp.raise_for_status()
-          soup = BeautifulSoup(resp.text, "html.parser")
-          link = soup.find("a", href=lambda x: x and "hsjday.zip" in x)
-          if not link:
-              raise Exception("未找到 hsjday.zip 下载链接")
-          url = link['href']
-          if url.startswith("//"):
-              url = "https:" + url
-          print(f"TDX_URL={url}")
-          with open(os.environ["GITHUB_ENV"], "a") as f:
-              f.write(f"TDX_URL={url}\n")
-          EOF
-
-      - name: Download TDX historical data
-        run: |
-          echo "正在下载: $TDX_URL"
-          wget -O tdx_data/hsjday.zip "$TDX_URL"
-          echo "下载完成 → tdx_data/hsjday.zip"
-          unzip -o tdx_data/hsjday.zip -d tdx_data || true
+          mkdir -p tdx_data
+          URL="https://data.tdx.com.cn/vipdoc/hsjday.zip"
+          echo "[INFO] 开始下载: $URL"
+          wget -O tdx_data/hsjday.zip $URL
+          echo "[INFO] 下载完成 → tdx_data/hsjday.zip"
+          unzip -o tdx_data/hsjday.zip -d tdx_data || echo "[WARN] 解压失败"
 
       - name: Run Auto Select Stock
-        run: python auto_select_stock.py
+        run: |
+          python auto_select_stock.py
 
       - name: Upload Results
         uses: actions/upload-artifact@v4
