@@ -1,6 +1,6 @@
-pandas>=2.0
+pandas
 numpy
 matplotlib
 tqdm
-requests
 akshare
+requests
