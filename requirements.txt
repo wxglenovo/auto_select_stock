@@ -1,7 +1,4 @@
 pandas>=2.0
-numpy>=1.24
-matplotlib>=3.7
-tqdm>=4.65
-requests>=2.31
-bs4>=0.0.1
-lxml>=4.9
+numpy
+matplotlib
+tqdm
