@@ -23,13 +23,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Download TDX Data (hsjday.zip 和 bjday.zip)
+      - name: Download TDX Data (仅沪深)
         run: |
           mkdir -p tdx_data
+          echo "[INFO] 下载 TDX hsjday.zip"
           wget -O tdx_data/hsjday.zip https://data.tdx.com.cn/vipdoc/hsjday.zip
-          wget -O tdx_data/bjday.zip https://data.tdx.com.cn/vipdoc/bjday.zip
+          
+          echo "[INFO] 解压 hsjday.zip"
           unzip -o tdx_data/hsjday.zip -d tdx_data || true
-          unzip -o tdx_data/bjday.zip -d tdx_data || true
 
       - name: Run Auto Select
         run: python auto_select_stock.py
