@@ -1,126 +1,84 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 import os
-import pandas as pd
-import akshare as ak
+import struct
 import datetime
+import pandas as pd
 import matplotlib.pyplot as plt
 
+TDX_DATA_DIR = "tdx_data"
 RESULT_CSV = "selected_stocks.csv"
 COUNT_PNG = "selected_stock_count.png"
-DAYS_NEED = 21  # 最近需要记录 21 个交易日选股数量
+DAYS_NEED = 21
 
 def log(msg):
     print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
 
-def is_trade_day(date):
-    """判断是否交易日（用上证交易日接口）"""
-    try:
-        trade_list = ak.tool_trade_date_hist_sina()
-        return date.strftime("%Y-%m-%d") in list(trade_list["trade_date"])
-    except:
-        return True  # 网络失败则按交易日处理避免程序退出
+def parse_day_file(path):
+    """解析单个通达信 .day 文件"""
+    result = []
+    if not os.path.exists(path):
+        return pd.DataFrame()
 
-def get_last_trade_day():
-    """获取最近一个交易日（周末或节假日自动回退）"""
-    today = datetime.date.today()
-    while not is_trade_day(today):
-        today -= datetime.timedelta(days=1)
-    return today
+    with open(path, "rb") as f:
+        while True:
+            buf = f.read(32)
+            if not buf:
+                break
+            date, open_p, high, low, close, amount, vol, _ = struct.unpack("<iiiiifii", buf)
+            year = date // 10000
+            month = date % 10000 // 100
+            day = date % 100
+            result.append([datetime.date(year, month, day), open_p/100, close/100])
 
-def get_stock_pool():
-    """获取沪深A股 + 北交所股票列表（剔除 ST、退市、无效股票）"""
-    log("获取沪深股票...")
-    try:
-        df_sh = ak.stock_info_sh_name()
-    except:
-        log("[错误] 沪深获取失败，返回空列表")
-        df_sh = pd.DataFrame()
+    return pd.DataFrame(result, columns=["date", "open", "close"])
 
-    log("获取北交所股票...")
-    try:
-        df_bj = ak.stock_info_bj_name()
-    except:
-        log("[错误] 北交所获取失败，返回空列表")
-        df_bj = pd.DataFrame()
-
-    if df_sh.empty and df_bj.empty:
-        log("[严重] 股票列表获取失败，程序终止")
-        return []
-
-    df = pd.concat([df_sh, df_bj], ignore_index=True)
-
-    # 剔除 ST、退市、空名称
-    df = df.dropna(subset=["code", "name"])
-    df = df[~df["name"].str.contains("ST")]
-    df = df[df["name"].str.strip() != ""]
-
-    log(f"股票数量：{len(df)}")
-    return df["code"].tolist()
-
-def simple_strategy(code):
-    """简单选股策略：最近 10 天上涨多于下跌则入选"""
-    try:
-        df = ak.stock_zh_a_daily(symbol=code)
-        if df is None or len(df) < 10:
-            return False
-        df = df.tail(10)
-        rise_days = (df["close"] > df["open"]).sum()
-        return rise_days >= 6
-    except:
-        log(f"[跳过] 下载失败: {code}")
+def simple_strategy(df):
+    """最近 10 天上涨 >= 6 天"""
+    if df.empty or len(df) < 10:
         return False
+    df10 = df.tail(10)
+    rise = (df10["close"] > df10["open"]).sum()
+    return rise >= 6
 
 def main():
-    log("开始运行自动选股程序")
+    log("开始运行自动选股（本地通达信数据）")
 
-    today = get_last_trade_day()
-    log(f"有效交易日：{today}")
-
-    pool = get_stock_pool()
-    if not pool:
-        log("[错误] 股票池为空，退出")
+    if not os.path.exists(TDX_DATA_DIR):
+        log("[错误] 缺少 TDX 数据，请先在 workflow 下载！")
         return
 
     selected = []
-    for code in pool:
-        if simple_strategy(code):
-            selected.append(code)
+    for root, _, files in os.walk(TDX_DATA_DIR):
+        for file in files:
+            if file.endswith(".day"):
+                code = file.replace(".day", "")
+                df = parse_day_file(os.path.join(root, file))
+                if simple_strategy(df):
+                    selected.append(code)
 
-    log(f"今日选出股票数量：{len(selected)}")
+    today = datetime.date.today()
+    log(f"今日选出：{len(selected)} 只股票")
 
-    # 存 CSV
-    df_result = pd.DataFrame({"date": [today] * len(selected), "code": selected})
-    df_result.to_csv(RESULT_CSV, index=False, encoding="utf-8-sig")
-    log(f"已保存选股结果 CSV：{RESULT_CSV}")
+    # 写 CSV
+    pd.DataFrame({"date": today, "code": selected}).to_csv(
+        RESULT_CSV, index=False, encoding="utf-8-sig"
+    )
 
-    # 处理折线图历史
-    count_data = []
-    if os.path.exists(RESULT_CSV):
-        try:
-            old = pd.read_csv(RESULT_CSV)
-            count_by_day = old.groupby("date")["code"].count().reset_index()
-            count_data = count_by_day.values.tolist()
-        except:
-            count_data = []
+    # 更新计数折线图
+    hist_file = "selected_stock_count_history.csv"
+    old = pd.read_csv(hist_file) if os.path.exists(hist_file) else pd.DataFrame(columns=["date", "count"])
 
-    # 保留最近 21 个交易日
-    count_data = count_data[-(DAYS_NEED - 1):]
-    count_data.append([str(today), len(selected)])
+    old = old.tail(DAYS_NEED - 1)
+    old.loc[len(old)] = [str(today), len(selected)]
+    old.to_csv(hist_file, index=False, encoding="utf-8-sig")
 
-    df_draw = pd.DataFrame(count_data, columns=["date", "count"])
-    df_draw.to_csv("selected_stock_count_history.csv", index=False, encoding="utf-8-sig")
-
-    # 生成折线图
     plt.figure()
-    plt.plot(df_draw["date"], df_draw["count"])
+    plt.plot(old["date"], old["count"])
     plt.xticks(rotation=45)
     plt.title("最近 21 日选股数量")
     plt.tight_layout()
     plt.savefig(COUNT_PNG)
-    log(f"已生成折线图：{COUNT_PNG}")
-
     log("✅ 全部完成！")
 
 if __name__ == "__main__":
