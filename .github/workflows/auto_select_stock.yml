@@ -2,7 +2,7 @@ name: Generate Chart
 
 on:
   schedule:
-    - cron: "10 8 * * 1-5"  # UTC 08:10 = 北京时间 16:10
+    - cron: "10 8 * * 1-5"
   workflow_dispatch:
 
 jobs:
@@ -11,26 +11,24 @@ jobs:
 
     steps:
       - name: ✅ Checkout
+        uses: actions/checkout@v4
+
+      - name: ✅ Git 配置（忽略错误）
         run: |
           git config --global user.email "actions@github.com" || true
           git config --global user.name "GitHub Actions" || true
-        shell: bash
-
-      - uses: actions/checkout@v4
 
       - name: ✅ 安装依赖（忽略错误）
         run: |
           sudo apt-get update || true
           sudo apt-get install -y unzip wget python3 python3-pip || true
           pip3 install matplotlib pandas numpy || true
-        shell: bash
 
       - name: ✅ 下载 TDX 数据（忽略错误）
         run: |
           mkdir -p tdx_data || true
           wget -q -O tdx_data/tdx.tgz "http://www.tdx.com.cn/products/data/tdx.tgz" || true
           tar -xzf tdx_data/tdx.tgz -C tdx_data || true
-        shell: bash
 
       - name: ✅ 运行 Python 生成图（忽略错误）
         run: |
@@ -40,7 +38,7 @@ target = "tdx_data/sh/lday/sh000001.day"
 if os.path.exists(target):
     try:
         df = pd.read_csv(target, header=None, sep="\t", engine="python", names=["date","open","high","low","close","volume"])
-        df = df.tail(100)  # 只取最近 100 天
+        df = df.tail(100)
         df["date"] = pd.to_datetime(df["date"], format="%Y%m%d")
         plt.figure()
         plt.plot(df["date"], df["close"])
@@ -48,19 +46,14 @@ if os.path.exists(target):
         plt.savefig("chart.png")
     except:
         pass
-else:
-    # 文件不存在也不报错
-    pass
 EOF
           python3 gen.py || true
-        shell: bash
 
-      - name: ✅ 提交改动（忽略错误，空改动不报错）
+      - name: ✅ 提交改动（忽略错误）
         run: |
           git add . || true
-          git commit -m "Update chart" || true
-          git push || true
-        shell: bash
+          (git commit -m "Update chart" || true)
+          (git push || true)
 
       - name: ✅ 永远成功
         run: exit 0
